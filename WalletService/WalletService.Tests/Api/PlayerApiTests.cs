@@ -50,6 +50,34 @@ public class PlayerApiTests(SqlServerFixture fx) : ApiTestBase(fx)
     }
 
     [Fact]
+    public async Task Topup_keys_are_scoped_per_player()
+    {
+        var alice = await SeedPlayer(usd: 10m);
+        var bob = await SeedPlayer(usd: 20m);
+        const string sharedKey = "1"; // a predictable key both players happen to choose
+
+        var aliceFirst = await Topup(TestCaller.Player(alice), new { currency = "USD", amount = "5.00" }, sharedKey);
+        var bobFirst = await Topup(TestCaller.Player(bob), new { currency = "USD", amount = "7.00" }, sharedKey);
+        var aliceRetry = await Topup(TestCaller.Player(alice), new { currency = "USD", amount = "5.00" }, sharedKey);
+
+        await AssertStatus(aliceFirst, HttpStatusCode.Created);
+        await AssertStatus(bobFirst, HttpStatusCode.Created);
+        await AssertStatus(aliceRetry, HttpStatusCode.OK);
+        var a = await Json(aliceFirst);
+        var b = await Json(bobFirst);
+        var r = await Json(aliceRetry);
+        Assert.Equal(sharedKey, a.GetProperty("reference").GetString());
+        Assert.Equal(sharedKey, b.GetProperty("reference").GetString());
+        Assert.NotEqual(a.GetProperty("id").GetString(), b.GetProperty("id").GetString());
+        Assert.Equal("15.00", a.GetProperty("balanceAfter").GetString());
+        Assert.Equal("27.00", b.GetProperty("balanceAfter").GetString());
+        Assert.True(r.GetProperty("replayed").GetBoolean());
+        Assert.Equal(a.GetProperty("id").GetString(), r.GetProperty("id").GetString());
+        Assert.Equal(15m, await BalanceOf(alice));
+        Assert.Equal(27m, await BalanceOf(bob));
+    }
+
+    [Fact]
     public async Task Topup_same_key_different_amount_is_409()
     {
         var me = await SeedPlayer();

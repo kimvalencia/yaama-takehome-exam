@@ -17,7 +17,7 @@ public abstract class ApiTestBase(SqlServerFixture fx)
 
     protected TestCaller Provider => TestCaller.Provider(ProviderId);
 
-    // Top-ups share provider id `player-topup`, so idempotency keys must be unique across the shared database.
+    // A fresh Idempotency-Key per test instance (keys are scoped per player, so this is just tidiness).
     protected readonly string Key = "key-" + Guid.NewGuid().ToString("N");
 
     protected async Task<HttpResponseMessage> Send(

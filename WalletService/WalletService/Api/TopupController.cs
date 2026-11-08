@@ -10,8 +10,13 @@ namespace WalletService.Api;
 [Tags("Player")]
 public sealed class TopupController(TransactionProcessor processor) : ControllerBase
 {
-    /// <summary>Provider id under which player top-ups are recorded; the reference is the Idempotency-Key.</summary>
-    public const string TopupProviderId = "player-topup";
+    /// <summary>
+    /// Provider id under which a player's top-ups are recorded: <c>topup:{playerId}</c> (lower-case GUID with hyphens,
+    /// 42 chars). The reference is the raw Idempotency-Key. Scoping the provider id per player keeps idempotency keys
+    /// private to each player under the (ProviderId, Reference) unique index, so one player can neither collide with
+    /// nor pre-claim another player's keys.
+    /// </summary>
+    public static string TopupProviderId(Guid playerId) => $"topup:{playerId:D}";
 
     [HttpPost("topup")]
     [Authorize(Policy = Policies.VerifiedPlayer)]
@@ -22,6 +27,7 @@ public sealed class TopupController(TransactionProcessor processor) : Controller
         Credits the caller's wallet with a DEPOSIT. Requires role `player` and `email_verified=true`.
         The `Idempotency-Key` header (max 100 chars) makes retries safe: the same key and payload returns the
         original transaction with **200** and `replayed: true`; the same key with a different payload returns **409**.
+        Keys are scoped to the calling player, so different players may use the same key independently.
         """)]
     [ProducesResponseType<TransactionResponse>(StatusCodes.Status201Created, "application/json", Description = "Top-up applied.")]
     [ProducesResponseType<TransactionResponse>(StatusCodes.Status200OK, "application/json", Description = "Replay of an identical earlier top-up.")]
@@ -45,7 +51,7 @@ public sealed class TopupController(TransactionProcessor processor) : Controller
         if (!Contract.TryParseAmount(request.Amount, currency, out var amount, out error))
             return ProblemResults.Validation(error!, HttpContext);
 
-        var command = new TransactionCommand(TopupProviderId, idempotencyKey, DepositHandler.TypeName, playerId,
+        var command = new TransactionCommand(TopupProviderId(playerId), idempotencyKey, DepositHandler.TypeName, playerId,
             currency, amount, null);
         return await TransactionsController.Execute(processor, command, this, ct);
     }

@@ -175,7 +175,7 @@ public class TransactionProcessorTests(SqlServerFixture fx)
         var player = await SeedWallet(0m, Currency.BTC);
 
         var result = await Process(new TransactionCommand(
-            "player-topup", Guid.NewGuid().ToString("N"), "DEPOSIT", player, Currency.BTC, 0.12345678m, null));
+            $"topup:{player:D}", Guid.NewGuid().ToString("N"), "DEPOSIT", player, Currency.BTC, 0.12345678m, null));
 
         Assert.Equal(ProcessStatus.Created, result.Status);
         Assert.Equal(0.12345678m, result.Transaction!.BalanceAfter);
