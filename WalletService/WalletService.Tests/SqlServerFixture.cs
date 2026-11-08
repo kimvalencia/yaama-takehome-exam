@@ -2,6 +2,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Testcontainers.MsSql;
 using WalletService.Data;
+using WalletService.Tests.Api;
 
 namespace WalletService.Tests;
 
@@ -33,7 +34,18 @@ public sealed class SqlServerFixture : IAsyncLifetime
     public WalletDbContext CreateContext() =>
         new(new DbContextOptionsBuilder<WalletDbContext>().UseSqlServer(ConnectionString).Options);
 
-    public Task DisposeAsync() => _container.DisposeAsync().AsTask();
+    private readonly Lazy<WalletApiFactory> _api;
+
+    public SqlServerFixture() => _api = new Lazy<WalletApiFactory>(() => new WalletApiFactory(ConnectionString));
+
+    /// <summary>One in-process Wallet API per test run, created on first use, sharing this database.</summary>
+    public WalletApiFactory Api => _api.Value;
+
+    public async Task DisposeAsync()
+    {
+        if (_api.IsValueCreated) await _api.Value.DisposeAsync();
+        await _container.DisposeAsync();
+    }
 }
 
 [CollectionDefinition(Name)]
