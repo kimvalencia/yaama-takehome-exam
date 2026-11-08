@@ -68,7 +68,10 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         await using var db = fx.CreateContext();
         var token = await db.VerificationTokens.AsNoTracking().SingleAsync(t => t.UserId == userId);
         Assert.NotEqual(rawToken, token.TokenHash);
-        Assert.Equal(64, token.TokenHash.Length);
+        Assert.Equal(RegistrationService.Hash(rawToken), token.TokenHash);
+        Assert.Equal(
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(rawToken))),
+            token.TokenHash);
         Assert.Equal(_time.GetUtcNow().AddHours(24), token.ExpiresAt);
         Assert.Null(token.UsedAt);
     }
@@ -123,13 +126,41 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         var email = NewEmail();
         var leftoverId = _identity.SeedLeftover(email);
 
-        var result = await Register(email);
+        var result = await Register(email, password: "NewSecret456!", displayName: "Retried Name");
 
         Assert.Equal(leftoverId, result.UserId);
         var identity = Assert.Single(_identity.IdentitiesFor(email));
         Assert.True(identity.IsPlayer);
-        Assert.NotNull(await UserById(leftoverId));
+        Assert.False(identity.Enabled);
+        Assert.False(identity.EmailVerified);
+        // The retry's credentials win, so the player can log in with what they just typed.
+        Assert.Equal("NewSecret456!", identity.Password);
+        Assert.Equal("Retried Name", identity.DisplayName);
+        Assert.Equal("Retried Name", (await UserById(leftoverId))!.DisplayName);
         Assert.Single(_email.SentTo(email));
+    }
+
+    [Theory]
+    [InlineData(true, true)]   // e.g. the realm's seeded admin@example.com
+    [InlineData(true, false)]  // enabled in the admin console, never verified
+    [InlineData(false, true)]  // verified but disabled (e.g. a suspended account)
+    public async Task Register_with_email_of_an_active_identity_returns_conflict_and_leaves_it_untouched(bool enabled, bool verified)
+    {
+        var email = NewEmail();
+        var existingId = _identity.Seed(email, enabled, verified);
+
+        var result = await Register(email, password: "Attacker123!", displayName: "Attacker");
+
+        Assert.Equal(ErrorCodes.EmailAlreadyRegistered, result.ErrorCode);
+        Assert.Null(result.UserId);
+        var identity = Assert.Single(_identity.IdentitiesFor(email));
+        Assert.Equal(new FakeIdentityProvider.Identity(existingId, email, "seeded", enabled, verified, IsPlayer: false,
+            Password: "old-password"), identity);
+        Assert.Null(await UserById(existingId));
+        await using var db = fx.CreateContext();
+        Assert.False(await db.Users.AnyAsync(u => u.Email == email));
+        Assert.False(await db.VerificationTokens.AnyAsync(t => t.UserId == existingId));
+        Assert.Empty(_email.SentTo(email));
     }
 
     [Fact]

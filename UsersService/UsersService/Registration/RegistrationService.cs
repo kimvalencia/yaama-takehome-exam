@@ -72,6 +72,11 @@ public sealed class RegistrationService(
         {
             return RegisterResult.Fail(ErrorCodes.ValidationFailed, ex.Message);
         }
+        catch (IdentityAlreadyExistsException)
+        {
+            // An account created outside this service (or already active): never adopt it.
+            return EmailTaken();
+        }
 
         var now = time.GetUtcNow();
         var rawToken = NewToken();

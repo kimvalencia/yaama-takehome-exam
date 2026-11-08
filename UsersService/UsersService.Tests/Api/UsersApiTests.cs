@@ -65,6 +65,22 @@ public class UsersApiTests(SqlServerFixture fx)
         Assert.Single(Api.Identity.IdentitiesFor(email));
     }
 
+    [Fact]
+    public async Task Post_users_with_email_of_seeded_active_admin_returns_409_and_does_not_touch_it()
+    {
+        var email = NewEmail();
+        var adminId = Api.Identity.Seed(email, enabled: true, emailVerified: true);
+
+        await AssertProblem(await Register(email), HttpStatusCode.Conflict, "EMAIL_ALREADY_REGISTERED");
+
+        var identity = Assert.IsType<FakeIdentityProvider.Identity>(Api.Identity.Get(adminId));
+        Assert.False(identity.IsPlayer);
+        Assert.Equal("old-password", identity.Password);
+        await using var db = fx.CreateContext();
+        Assert.False(await db.Users.AnyAsync(u => u.Id == adminId));
+        Assert.Empty(Api.Email.SentTo(email));
+    }
+
     [Theory]
     [InlineData("""{"email":"nope","password":"Secret123!","displayName":"P"}""")]
     [InlineData("""{"email":"a@example.com","password":"1234567","displayName":"P"}""")]

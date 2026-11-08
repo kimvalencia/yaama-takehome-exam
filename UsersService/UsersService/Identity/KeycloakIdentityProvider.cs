@@ -62,9 +62,9 @@ public sealed class KeycloakIdentityProvider(HttpClient http, IOptions<KeycloakO
             }
             else if (create.StatusCode == HttpStatusCode.Conflict)
             {
-                // A previous attempt already created this identity: reuse it.
                 userId = await FindUserIdByEmailAsync(username, token, ct)
                          ?? throw new InvalidOperationException($"Keycloak reported a conflict for {username} but no such user was found.");
+                await ReuseLeftoverAsync(userId, username, password, displayName, token, ct);
             }
             else if (create.StatusCode == HttpStatusCode.BadRequest)
             {
@@ -102,6 +102,43 @@ public sealed class KeycloakIdentityProvider(HttpClient http, IOptions<KeycloakO
         user["emailVerified"] = true;
         using var put = await SendAsync(HttpMethod.Put, url, token, user, ct);
         await EnsureSuccessAsync(put, "enable user", ct);
+    }
+
+    /// <summary>
+    /// Adopts an existing identity only if it is a leftover of a crashed registration (disabled and unverified);
+    /// an enabled or verified identity is a real account (e.g. the seeded admin) and is left untouched.
+    /// The leftover gets this attempt's password and name, so the player can log in with what they just entered.
+    /// </summary>
+    private async Task ReuseLeftoverAsync(Guid userId, string email, string password, string displayName, string token, CancellationToken ct)
+    {
+        var url = $"{Admin}/users/{userId:D}";
+        JsonObject user;
+        using (var get = await SendAsync(HttpMethod.Get, url, token, null, ct))
+        {
+            await EnsureSuccessAsync(get, "read the existing user", ct);
+            user = (await get.Content.ReadFromJsonAsync<JsonObject>(ct))!;
+        }
+
+        if (user["enabled"]?.GetValue<bool>() != false || user["emailVerified"]?.GetValue<bool>() != false)
+            throw new IdentityAlreadyExistsException(email);
+
+        using (var reset = await SendAsync(HttpMethod.Put, $"{url}/reset-password", token, new JsonObject
+               {
+                   ["type"] = "password",
+                   ["value"] = password,
+                   ["temporary"] = false,
+               }, ct))
+        {
+            if (reset.StatusCode == HttpStatusCode.BadRequest)
+                throw new IdentityRejectedException(await ErrorMessageAsync(reset, ct));
+            await EnsureSuccessAsync(reset, "reset the leftover user's password", ct);
+        }
+
+        // Read-modify-write the full representation so the PUT does not drop other profile fields.
+        user["firstName"] = displayName;
+        user["lastName"] = displayName;
+        using var put = await SendAsync(HttpMethod.Put, url, token, user, ct);
+        await EnsureSuccessAsync(put, "update the leftover user's name", ct);
     }
 
     private async Task AssignPlayerRoleAsync(Guid userId, string token, CancellationToken ct)

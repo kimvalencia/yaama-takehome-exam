@@ -6,11 +6,14 @@ namespace UsersService.Tests;
 
 /// <summary>
 /// In-memory stand-in for Keycloak with the same semantics the real provider has:
-/// one identity per (case-insensitive) email; creating an existing email returns the existing id.
+/// one identity per (case-insensitive) email; creating an existing disabled+unverified email reuses it with the
+/// new password and name; an existing enabled or verified identity throws <see cref="IdentityAlreadyExistsException"/>
+/// and is left untouched.
 /// </summary>
 public sealed class FakeIdentityProvider : IIdentityProvider
 {
-    public sealed record Identity(Guid Id, string Email, string DisplayName, bool Enabled, bool EmailVerified, bool IsPlayer);
+    public sealed record Identity(Guid Id, string Email, string DisplayName, bool Enabled, bool EmailVerified, bool IsPlayer,
+        string? Password = null);
 
     private readonly ConcurrentDictionary<string, Identity> _byEmail = new(StringComparer.OrdinalIgnoreCase);
     private int _createCalls;
@@ -23,10 +26,14 @@ public sealed class FakeIdentityProvider : IIdentityProvider
     public Identity? Get(Guid id) => _byEmail.Values.SingleOrDefault(i => i.Id == id);
 
     /// <summary>Simulates an earlier attempt that created the Keycloak user and then crashed before saving locally.</summary>
-    public Guid SeedLeftover(string email)
+    public Guid SeedLeftover(string email) => Seed(email, enabled: false, emailVerified: false);
+
+    /// <summary>Seeds an identity created outside this service, e.g. the realm's admin or a console-created user.</summary>
+    public Guid Seed(string email, bool enabled, bool emailVerified)
     {
         var id = Guid.NewGuid();
-        _byEmail[email] = new Identity(id, email.ToLowerInvariant(), "leftover", false, false, IsPlayer: false);
+        _byEmail[email] = new Identity(id, email.ToLowerInvariant(), "seeded", enabled, emailVerified, IsPlayer: false,
+            Password: "old-password");
         return id;
     }
 
@@ -34,8 +41,10 @@ public sealed class FakeIdentityProvider : IIdentityProvider
     {
         Interlocked.Increment(ref _createCalls);
         var identity = _byEmail.AddOrUpdate(email,
-            _ => new Identity(Guid.NewGuid(), email.ToLowerInvariant(), displayName, false, false, IsPlayer: true),
-            (_, existing) => existing with { IsPlayer = true });
+            _ => new Identity(Guid.NewGuid(), email.ToLowerInvariant(), displayName, false, false, IsPlayer: true, password),
+            (_, existing) => existing.Enabled || existing.EmailVerified
+                ? throw new IdentityAlreadyExistsException(email)
+                : existing with { IsPlayer = true, Password = password, DisplayName = displayName });
         return Task.FromResult(identity.Id);
     }
 
