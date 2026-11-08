@@ -9,3 +9,8 @@ WalletService/WalletService/bin/
 # Tooling scratch
 .claude/
 .superpowers/
+
+**/bin/
+**/obj/
+**/.vs/
+.env
