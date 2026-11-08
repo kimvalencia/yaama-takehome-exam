@@ -104,6 +104,11 @@ public sealed class TransactionProcessor(WalletDbContext db, IEnumerable<ITransa
         if (error is not null)
         {
             await tx.RollbackAsync(ct);
+            db.ChangeTracker.Clear();
+            // A racing identical request may have committed while we were inside the transaction.
+            // Re-check before returning the handler's rejection so the caller gets a replay, not a spurious error.
+            var afterValidationReject = await FindExistingAsync(c, handler, ct);
+            if (afterValidationReject is not null) return afterValidationReject;
             return ProcessResult.Rejected(error);
         }
 
@@ -120,6 +125,11 @@ public sealed class TransactionProcessor(WalletDbContext db, IEnumerable<ITransa
         if (updated == 0)
         {
             await tx.RollbackAsync(ct);
+            db.ChangeTracker.Clear();
+            // A racing identical request may have been the one that consumed the last balance unit.
+            // Re-check: if it committed our reference, replay rather than return INSUFFICIENT_FUNDS.
+            var afterUpdateReject = await FindExistingAsync(c, handler, ct);
+            if (afterUpdateReject is not null) return afterUpdateReject;
             return ProcessResult.Rejected(ErrorCodes.InsufficientFunds);
         }
 

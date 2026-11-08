@@ -259,4 +259,59 @@ public class TransactionProcessorTests(SqlServerFixture fx)
         Assert.Equal(90m, await BalanceOf(player));
         Assert.Equal(1, await TransactionCountOf(player));
     }
+
+    [Fact]
+    public async Task Twenty_parallel_identical_bets_on_exact_balance_all_resolve_as_created_or_replayed()
+    {
+        // balance == amount: only one bet can succeed; racing losers must replay (not get INSUFFICIENT_FUNDS).
+        var player = await SeedWallet(10m);
+        var command = Bet(player, 10m, "exact-balance-ref");
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var tasks = Enumerable.Range(0, 20).Select(_ => Task.Run(async () =>
+        {
+            await using var db = fx.CreateContext();
+            var processor = NewProcessor(db);
+            await start.Task;
+            return await processor.ProcessAsync(command, CancellationToken.None);
+        })).ToArray();
+        start.SetResult();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.Equal(1, results.Count(r => r.Status == ProcessStatus.Created));
+        Assert.Equal(19, results.Count(r => r.Status == ProcessStatus.Replayed));
+        Assert.Single(results.Select(r => r.Transaction!.Id).Distinct());
+        Assert.All(results, r => Assert.Equal(0m, r.Transaction!.BalanceAfter));
+        Assert.Equal(0m, await BalanceOf(player));
+        Assert.Equal(1, await TransactionCountOf(player));
+    }
+
+    [Fact]
+    public async Task Twenty_parallel_identical_wins_create_one_transaction_and_replay_the_rest()
+    {
+        // A settled BET and 20 parallel identical WINs: the loser threads must replay (not get BET_ALREADY_SETTLED).
+        var player = await SeedWallet(100m);
+        var betRef = "bet-for-parallel-win";
+        var betResult = await Process(Bet(player, 10m, betRef));
+        Assert.Equal(ProcessStatus.Created, betResult.Status);
+
+        var winCommand = Win(player, 10m, betRef, "win-parallel-ref");
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var tasks = Enumerable.Range(0, 20).Select(_ => Task.Run(async () =>
+        {
+            await using var db = fx.CreateContext();
+            var processor = NewProcessor(db);
+            await start.Task;
+            return await processor.ProcessAsync(winCommand, CancellationToken.None);
+        })).ToArray();
+        start.SetResult();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.Equal(1, results.Count(r => r.Status == ProcessStatus.Created));
+        Assert.Equal(19, results.Count(r => r.Status == ProcessStatus.Replayed));
+        Assert.Single(results.Select(r => r.Transaction!.Id).Distinct());
+        // 2 total: the seeded BET + exactly one WIN
+        Assert.Equal(2, await TransactionCountOf(player));
+    }
 }
