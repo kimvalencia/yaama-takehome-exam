@@ -5,3 +5,7 @@ UsersService/UsersService/obj/
 WalletService/.vs/
 WalletService/WalletService/obj/
 WalletService/WalletService/bin/
+
+# Tooling scratch
+.claude/
+.superpowers/
