@@ -1,6 +1,15 @@
 @UsersService_HostAddress = http://localhost:5237
 
-GET {{UsersService_HostAddress}}/weatherforecast/
-Accept: application/json
+POST {{UsersService_HostAddress}}/v1/users
+Content-Type: application/json
+
+{ "email": "jane@example.com", "password": "Secret123!", "displayName": "Jane" }
+
+###
+
+POST {{UsersService_HostAddress}}/v1/users/verify
+Content-Type: application/json
+
+{ "token": "<token from the email in Mailpit>" }
 
 ###
