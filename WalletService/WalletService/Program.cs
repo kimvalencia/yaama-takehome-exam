@@ -4,6 +4,7 @@ using WalletService.Api;
 using WalletService.Auth;
 using WalletService.Data;
 using WalletService.Domain;
+using WalletService.Messaging;
 using WalletService.Transactions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,6 +21,9 @@ builder.Services.AddScoped<TransactionProcessor>();
 builder.Services.AddScoped<WalletQueries>();
 
 builder.Services.AddWalletAuth();
+
+// PlayerRegistered consumer (creates the wallets) over RabbitMQ, or in-memory in tests.
+builder.Services.AddWalletMessaging(builder.Configuration, builder.Environment);
 
 builder.Services.AddProblemDetails();
 builder.Services.AddControllers()

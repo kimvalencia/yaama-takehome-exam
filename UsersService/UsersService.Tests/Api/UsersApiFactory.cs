@@ -24,6 +24,8 @@ public sealed class UsersApiFactory(string connectionString) : WebApplicationFac
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:UsersDb", connectionString);
         builder.UseSetting("Users:PublicBaseUrl", PublicBaseUrl);
+        // In-memory bus with outbox delivery on: registration -> outbox -> email consumer -> FakeEmailSender.
+        builder.UseSetting("Messaging:Transport", "InMemory");
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IIdentityProvider>();

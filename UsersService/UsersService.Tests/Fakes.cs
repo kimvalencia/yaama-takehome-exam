@@ -61,14 +61,37 @@ public sealed class FakeEmailSender : IEmailSender
     public sealed record Sent(string Email, string VerifyUrl);
 
     private readonly ConcurrentQueue<Sent> _sent = new();
+    private int _attempts;
+    private int _failuresLeft;
 
     public IReadOnlyList<Sent> SentTo(string email) =>
         _sent.Where(s => string.Equals(s.Email, email, StringComparison.OrdinalIgnoreCase)).ToList();
 
+    /// <summary>Calls to <see cref="SendVerificationAsync"/>, including failed ones.</summary>
+    public int Attempts => _attempts;
+
+    /// <summary>Makes the next <paramref name="count"/> sends throw, like an SMTP outage.</summary>
+    public void FailNext(int count) => Interlocked.Exchange(ref _failuresLeft, count);
+
     public Task SendVerificationAsync(string email, string verifyUrl, CancellationToken ct)
     {
+        Interlocked.Increment(ref _attempts);
+        if (Interlocked.Decrement(ref _failuresLeft) >= 0)
+            throw new System.Net.Mail.SmtpException("Simulated SMTP outage.");
         _sent.Enqueue(new Sent(email, verifyUrl));
         return Task.CompletedTask;
+    }
+
+    /// <summary>Emails are sent by a consumer after the registration committed: wait (bounded) for one to arrive.</summary>
+    public async Task<Sent> WaitForAsync(string email, TimeSpan? timeout = null)
+    {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30));
+        while (true)
+        {
+            if (SentTo(email).LastOrDefault() is { } sent) return sent;
+            if (DateTime.UtcNow > deadline) throw new TimeoutException($"No verification email to {email} in time.");
+            await Task.Delay(25);
+        }
     }
 
     /// <summary>The raw token from the last link sent to <paramref name="email"/>.</summary>

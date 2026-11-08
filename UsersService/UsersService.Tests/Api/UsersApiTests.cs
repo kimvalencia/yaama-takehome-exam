@@ -51,7 +51,8 @@ public class UsersApiTests(SqlServerFixture fx)
         var userId = (await Json(response)).GetProperty("userId").GetGuid();
         Assert.Equal(userId, Assert.Single(Api.Identity.IdentitiesFor(email)).Id);
         Assert.StartsWith($"{UsersApiFactory.PublicBaseUrl}/v1/users/verify?token=",
-            Assert.Single(Api.Email.SentTo(email)).VerifyUrl);
+            (await Api.Email.WaitForAsync(email)).VerifyUrl);
+        Assert.Single(Api.Email.SentTo(email));
     }
 
     [Fact]
@@ -108,6 +109,7 @@ public class UsersApiTests(SqlServerFixture fx)
     {
         var email = NewEmail();
         var userId = (await Json(await Register(email))).GetProperty("userId").GetGuid();
+        await Api.Email.WaitForAsync(email); // sent by the consumer after the outbox delivered
         var token = Api.Email.TokenFor(email);
 
         await AssertStatus(await PostJson("/v1/users/verify", new { token }), HttpStatusCode.NoContent);
@@ -123,7 +125,7 @@ public class UsersApiTests(SqlServerFixture fx)
     {
         var email = NewEmail();
         var userId = (await Json(await Register(email))).GetProperty("userId").GetGuid();
-        var link = new Uri(Api.Email.SentTo(email).Single().VerifyUrl);
+        var link = new Uri((await Api.Email.WaitForAsync(email)).VerifyUrl);
 
         var response = await _client.GetAsync(link.PathAndQuery);
 

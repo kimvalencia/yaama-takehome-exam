@@ -16,6 +16,7 @@ public sealed class WalletApiFactory(string connectionString) : WebApplicationFa
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:WalletDb", connectionString);
+        builder.UseSetting("Messaging:Transport", "InMemory"); // never needs RabbitMQ
         builder.ConfigureTestServices(services =>
         {
             services.AddAuthentication(o =>

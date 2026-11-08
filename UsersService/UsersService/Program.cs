@@ -5,6 +5,7 @@ using UsersService.Data;
 using UsersService.Domain;
 using UsersService.Email;
 using UsersService.Identity;
+using UsersService.Messaging;
 using UsersService.Registration;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,6 +23,9 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHttpClient<IIdentityProvider, KeycloakIdentityProvider>(c => c.Timeout = TimeSpan.FromSeconds(15));
 builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
 builder.Services.AddScoped<RegistrationService>();
+
+// EF bus outbox (PlayerRegistered, VerificationEmailRequested) and the email consumer, over RabbitMQ or in-memory.
+builder.Services.AddUsersMessaging(builder.Configuration, builder.Environment);
 
 builder.Services.AddProblemDetails();
 builder.Services.AddControllers()

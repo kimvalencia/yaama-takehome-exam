@@ -1,3 +1,4 @@
+using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using WalletService.Domain;
@@ -48,6 +49,11 @@ public class WalletDbContext(DbContextOptions<WalletDbContext> options) : DbCont
             // History per wallet, newest first, cursor on Seq.
             e.HasIndex(t => new { t.WalletId, t.Seq });
         });
+
+        // MassTransit EF inbox/outbox tables (idempotent consumption of PlayerRegistered).
+        modelBuilder.AddInboxStateEntity();
+        modelBuilder.AddOutboxMessageEntity();
+        modelBuilder.AddOutboxStateEntity();
     }
 }
 

@@ -1,41 +1,48 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using UsersService.Domain;
 using UsersService.Registration;
 
 namespace UsersService.Tests;
 
+/// <summary>
+/// Registration and verification through DI, with outbox delivery disabled: the verification email is observed as
+/// the <c>VerificationEmailRequested</c> message written to the outbox (sending it is covered by the consumer and
+/// API tests). This keeps "exactly one" / "none" email assertions deterministic.
+/// </summary>
 [Collection(SqlServerCollection.Name)]
-public class RegistrationServiceTests(SqlServerFixture fx)
+public class RegistrationServiceTests(SqlServerFixture fx) : IAsyncLifetime
 {
     private const string BaseUrl = "http://users.test";
 
     private readonly FakeIdentityProvider _identity = new();
     private readonly FakeEmailSender _email = new();
     private readonly MutableTimeProvider _time = new(new DateTimeOffset(2026, 11, 9, 12, 0, 0, TimeSpan.Zero));
+    private NoDeliveryHost _host = null!;
+
+    public async Task InitializeAsync() =>
+        _host = await NoDeliveryHost.StartAsync(fx.NoDeliveryConnectionString, _identity, _email, _time, BaseUrl);
+
+    public async Task DisposeAsync() => await _host.DisposeAsync();
 
     private static string NewEmail() => $"player-{Guid.NewGuid():N}@example.com";
 
-    private async Task<RegisterResult> Register(string email, string password = "Secret123!", string displayName = "Player One")
+    private Task<RegisterResult> Register(string email, string password = "Secret123!", string displayName = "Player One") =>
+        _host.RegisterAsync(new RegisterRequest(email, password, displayName));
+
+    private Task<VerifyResult> Verify(string token) => _host.VerifyAsync(token);
+
+    /// <summary>Verify links requested for <paramref name="email"/> (one per <c>VerificationEmailRequested</c> outbox row).</summary>
+    private async Task<List<string>> VerifyUrlsFor(string email)
     {
-        await using var db = fx.CreateContext();
-        return await NewService(db).RegisterAsync(new RegisterRequest(email, password, displayName), CancellationToken.None);
+        await using var db = fx.CreateNoDeliveryContext();
+        return await OutboxRows.VerifyUrlsForAsync(db, email);
     }
 
-    private async Task<VerifyResult> Verify(string token)
-    {
-        await using var db = fx.CreateContext();
-        return await NewService(db).VerifyAsync(token, CancellationToken.None);
-    }
-
-    private RegistrationService NewService(Data.UsersDbContext db) =>
-        new(db, _identity, _email, _time, Options.Create(new UsersOptions { PublicBaseUrl = BaseUrl }),
-            NullLogger<RegistrationService>.Instance);
+    private async Task<string> TokenFor(string email) => OutboxRows.TokenOf((await VerifyUrlsFor(email)).Last());
 
     private async Task<User?> UserById(Guid id)
     {
-        await using var db = fx.CreateContext();
+        await using var db = fx.CreateNoDeliveryContext();
         return await db.Users.AsNoTracking().SingleOrDefaultAsync(u => u.Id == id);
     }
 
@@ -62,10 +69,11 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         Assert.Equal(_time.GetUtcNow(), user.CreatedAt);
 
         // Only the hash is stored; the raw token travels in the emailed link.
-        var sent = Assert.Single(_email.SentTo(email));
-        Assert.StartsWith($"{BaseUrl}/v1/users/verify?token=", sent.VerifyUrl);
-        var rawToken = _email.TokenFor(email);
-        await using var db = fx.CreateContext();
+        var sent = Assert.Single(await VerifyUrlsFor(email));
+        Assert.StartsWith($"{BaseUrl}/v1/users/verify?token=", sent);
+        Assert.Empty(_email.SentTo(email)); // sent later by the consumer, never inline
+        var rawToken = await TokenFor(email);
+        await using var db = fx.CreateNoDeliveryContext();
         var token = await db.VerificationTokens.AsNoTracking().SingleAsync(t => t.UserId == userId);
         Assert.NotEqual(rawToken, token.TokenHash);
         Assert.Equal(RegistrationService.Hash(rawToken), token.TokenHash);
@@ -89,7 +97,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         Assert.Null(second.UserId);
         Assert.Single(_identity.IdentitiesFor(email));
         Assert.Equal(1, _identity.CreateCalls); // the local check rejects before touching Keycloak
-        Assert.Single(_email.SentTo(email));
+        Assert.Single(await VerifyUrlsFor(email));
     }
 
     [Fact]
@@ -137,7 +145,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         Assert.Equal("NewSecret456!", identity.Password);
         Assert.Equal("Retried Name", identity.DisplayName);
         Assert.Equal("Retried Name", (await UserById(leftoverId))!.DisplayName);
-        Assert.Single(_email.SentTo(email));
+        Assert.Single(await VerifyUrlsFor(email));
     }
 
     [Theory]
@@ -157,10 +165,10 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         Assert.Equal(new FakeIdentityProvider.Identity(existingId, email, "seeded", enabled, verified, IsPlayer: false,
             Password: "old-password"), identity);
         Assert.Null(await UserById(existingId));
-        await using var db = fx.CreateContext();
+        await using var db = fx.CreateNoDeliveryContext();
         Assert.False(await db.Users.AnyAsync(u => u.Email == email));
         Assert.False(await db.VerificationTokens.AnyAsync(t => t.UserId == existingId));
-        Assert.Empty(_email.SentTo(email));
+        Assert.Empty(await VerifyUrlsFor(email));
     }
 
     [Fact]
@@ -173,7 +181,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         Assert.Single(results, r => r.UserId is not null);
         Assert.All(results.Where(r => r.UserId is null), r => Assert.Equal(ErrorCodes.EmailAlreadyRegistered, r.ErrorCode));
         Assert.Single(_identity.IdentitiesFor(email));
-        await using var db = fx.CreateContext();
+        await using var db = fx.CreateNoDeliveryContext();
         Assert.Equal(1, await db.Users.CountAsync(u => u.Email == email));
     }
 
@@ -208,7 +216,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         var userId = (await Register(email)).UserId!.Value;
         _time.Advance(TimeSpan.FromHours(1));
 
-        var result = await Verify(_email.TokenFor(email));
+        var result = await Verify(await TokenFor(email));
 
         Assert.True(result.Success);
         var identity = Assert.IsType<FakeIdentityProvider.Identity>(_identity.Get(userId));
@@ -216,7 +224,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         Assert.True(identity.EmailVerified);
         var user = Assert.IsType<User>(await UserById(userId));
         Assert.Equal(_time.GetUtcNow(), user.EmailVerifiedAt);
-        await using var db = fx.CreateContext();
+        await using var db = fx.CreateNoDeliveryContext();
         var token = await db.VerificationTokens.AsNoTracking().SingleAsync(t => t.UserId == userId);
         Assert.Equal(_time.GetUtcNow(), token.UsedAt);
     }
@@ -226,7 +234,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
     {
         var email = NewEmail();
         var userId = (await Register(email)).UserId!.Value;
-        var token = _email.TokenFor(email);
+        var token = await TokenFor(email);
         Assert.True((await Verify(token)).Success);
         var firstVerifiedAt = (await UserById(userId))!.EmailVerifiedAt;
 
@@ -245,7 +253,7 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         var expiredEmail = NewEmail();
         var expiredUser = (await Register(expiredEmail)).UserId!.Value;
         _time.Advance(TimeSpan.FromHours(24));
-        var expired = await Verify(_email.TokenFor(expiredEmail));
+        var expired = await Verify(await TokenFor(expiredEmail));
         Assert.False(expired.Success);
         Assert.Equal(ErrorCodes.InvalidToken, expired.ErrorCode);
         Assert.False(_identity.Get(expiredUser)!.Enabled);
@@ -262,9 +270,9 @@ public class RegistrationServiceTests(SqlServerFixture fx)
         // Used token whose user is (somehow) not verified: invalid, not a silent success.
         var usedEmail = NewEmail();
         var usedUser = (await Register(usedEmail)).UserId!.Value;
-        var usedToken = _email.TokenFor(usedEmail);
+        var usedToken = await TokenFor(usedEmail);
         Assert.True((await Verify(usedToken)).Success);
-        await using (var db = fx.CreateContext())
+        await using (var db = fx.CreateNoDeliveryContext())
         {
             var user = await db.Users.SingleAsync(u => u.Id == usedUser);
             user.EmailVerifiedAt = null;

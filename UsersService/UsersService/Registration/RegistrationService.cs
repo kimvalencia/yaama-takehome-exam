@@ -2,12 +2,13 @@ using System.Buffers.Text;
 using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
+using Contracts;
+using MassTransit;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using UsersService.Data;
 using UsersService.Domain;
-using UsersService.Email;
 using UsersService.Identity;
 
 namespace UsersService.Registration;
@@ -39,10 +40,9 @@ public sealed class UsersOptions
 public sealed class RegistrationService(
     UsersDbContext db,
     IIdentityProvider identity,
-    IEmailSender email,
+    IPublishEndpoint publish,
     TimeProvider time,
-    IOptions<UsersOptions> options,
-    ILogger<RegistrationService> logger)
+    IOptions<UsersOptions> options)
 {
     public const int MinPasswordLength = 8;
     public const int MaxPasswordLength = 128;
@@ -50,7 +50,9 @@ public sealed class RegistrationService(
 
     /// <summary>
     /// Registers a player: rejects a known email (case-insensitive), creates (or reuses) the disabled Keycloak identity,
-    /// then saves the user and the hashed verification token in one DB transaction, then sends the verification email.
+    /// then saves the user, the hashed verification token and the <see cref="PlayerRegistered"/> and
+    /// <see cref="VerificationEmailRequested"/> outbox messages in one DB transaction. The email is sent afterwards
+    /// by <see cref="Messaging.SendVerificationEmailConsumer"/>; the wallets are created by the Wallet service.
     /// </summary>
     public async Task<RegisterResult> RegisterAsync(RegisterRequest r, CancellationToken ct)
     {
@@ -80,8 +82,7 @@ public sealed class RegistrationService(
 
         var now = time.GetUtcNow();
         var rawToken = NewToken();
-        var user = new User { Id = userId, Email = emailAddress, DisplayName = displayName, CreatedAt = now };
-        db.Users.Add(user);
+        db.Users.Add(new User { Id = userId, Email = emailAddress, DisplayName = displayName, CreatedAt = now });
         db.VerificationTokens.Add(new VerificationToken
         {
             Id = Guid.NewGuid(),
@@ -90,9 +91,16 @@ public sealed class RegistrationService(
             ExpiresAt = now.Add(VerificationToken.Lifetime),
         });
 
+        // The scoped publish endpoint is the EF bus outbox: these only add OutboxMessage rows to this DbContext.
+        // They reach RabbitMQ after the commit, via the outbox delivery service (retried while the broker is down).
+        await publish.Publish(new PlayerRegistered(userId, now), ct);
+        await publish.Publish(
+            new VerificationEmailRequested(userId, emailAddress, VerifyUrl(options.Value.PublicBaseUrl, rawToken)), ct);
+
         try
         {
-            // One SaveChanges = one DB transaction for the user and its token (Task 5 adds the outbox message here).
+            // One SaveChanges = one DB transaction for the user, its token and both outbox messages:
+            // all of them are stored, or (e.g. on a unique violation) none.
             await db.SaveChangesAsync(ct);
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
@@ -101,7 +109,6 @@ public sealed class RegistrationService(
             return EmailTaken();
         }
 
-        await SendVerificationEmailAsync(user.Email, rawToken, ct);
         return RegisterResult.Ok(userId);
     }
 
@@ -141,23 +148,6 @@ public sealed class RegistrationService(
             .ExecuteUpdateAsync(s => s.SetProperty(u => u.EmailVerifiedAt, now), ct);
         await tx.CommitAsync(ct);
         return VerifyResult.Ok;
-    }
-
-    /// <summary>
-    /// Sends the verification email right after the commit. Task 5 replaces this with an outbox message so the
-    /// email survives a crash; until then a failed send is logged and the registration still stands.
-    /// </summary>
-    private async Task SendVerificationEmailAsync(string to, string rawToken, CancellationToken ct)
-    {
-        var url = VerifyUrl(options.Value.PublicBaseUrl, rawToken);
-        try
-        {
-            await email.SendVerificationAsync(to, url, ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            logger.LogError(ex, "Sending the verification email to {Email} failed.", to);
-        }
     }
 
     public static string VerifyUrl(string publicBaseUrl, string rawToken) =>

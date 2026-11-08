@@ -1,3 +1,4 @@
+using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using UsersService.Domain;
@@ -32,6 +33,11 @@ public class UsersDbContext(DbContextOptions<UsersDbContext> options) : DbContex
             e.HasIndex(t => t.TokenHash).IsUnique();
             e.HasOne<User>().WithMany().HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
         });
+
+        // MassTransit EF outbox (messages saved in the registration transaction) and inbox (email consumer).
+        modelBuilder.AddInboxStateEntity();
+        modelBuilder.AddOutboxMessageEntity();
+        modelBuilder.AddOutboxStateEntity();
     }
 }
 
