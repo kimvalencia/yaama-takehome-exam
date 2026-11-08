@@ -1,3 +1,4 @@
+using Contracts;
 using MassTransit;
 using UsersService.Data;
 
@@ -14,11 +15,61 @@ public sealed class RabbitMqOptions
     public string Password { get; set; } = "guest";
 }
 
-public static class MessagingRetry
+/// <summary>
+/// Consumer resilience, bound from the <c>Messaging</c> section. The defaults are the production values; tests
+/// shorten the retry intervals.
+/// </summary>
+public sealed class MessagingOptions
 {
-    /// <summary>Exponential backoff: about 1 s, 3 s, 7 s, 15 s, 30 s, then the message moves to the <c>_error</c> queue.</summary>
-    public static void Configure(IRetryConfigurator r) =>
-        r.Exponential(5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(2));
+    public const string Section = "Messaging";
+
+    /// <summary>Messages processed in parallel per endpoint (per instance).</summary>
+    public int ConcurrentMessageLimit { get; set; } = 8;
+
+    public RetrySettings Retry { get; set; } = new();
+    public KillSwitchSettings KillSwitch { get; set; } = new();
+
+    /// <summary>
+    /// Exponential in-memory retry. Defaults: 10 retries, about 1 s, 6 s, 16 s, 36 s, 76 s, 156 s, then 5 min each
+    /// (MassTransit adds +-20% jitter to the delta), so one message keeps retrying for roughly 25 minutes before it
+    /// would move to the <c>_error</c> queue.
+    /// </summary>
+    public sealed class RetrySettings
+    {
+        public int Limit { get; set; } = 10;
+        public TimeSpan MinInterval { get; set; } = TimeSpan.FromSeconds(1);
+        public TimeSpan MaxInterval { get; set; } = TimeSpan.FromMinutes(5);
+        public TimeSpan IntervalDelta { get; set; } = TimeSpan.FromSeconds(5);
+    }
+
+    /// <summary>
+    /// Kill switch: once at least <see cref="ActivationThreshold"/> messages were seen in <see cref="TrackingPeriod"/>
+    /// and <see cref="TripThreshold"/> of them faulted, the endpoint stops for <see cref="RestartTimeout"/>; unconsumed
+    /// messages stay in the queue (in-flight ones are returned) instead of draining into <c>_error</c>.
+    /// </summary>
+    public sealed class KillSwitchSettings
+    {
+        public int ActivationThreshold { get; set; } = 10;
+        public double TripThreshold { get; set; } = 0.15;
+        public TimeSpan TrackingPeriod { get; set; } = TimeSpan.FromMinutes(1);
+        public TimeSpan RestartTimeout { get; set; } = TimeSpan.FromMinutes(1);
+    }
+}
+
+public static class MessagingResilience
+{
+    /// <summary>Kill switch, then retry; call before the EF inbox/outbox so each retry gets a fresh DB transaction.</summary>
+    public static void Apply(IReceiveEndpointConfigurator endpoint, MessagingOptions options)
+    {
+        var k = options.KillSwitch;
+        endpoint.UseKillSwitch(o => o
+            .SetActivationThreshold(k.ActivationThreshold)
+            .SetTripThreshold(k.TripThreshold)
+            .SetTrackingPeriod(k.TrackingPeriod)
+            .SetRestartTimeout(k.RestartTimeout));
+        var r = options.Retry;
+        endpoint.UseMessageRetry(c => c.Exponential(r.Limit, r.MinInterval, r.MaxInterval, r.IntervalDelta));
+    }
 }
 
 /// <summary>
@@ -29,6 +80,12 @@ public static class MessagingRetry
 public static class UsersMessaging
 {
     public const string TransportKey = "Messaging:Transport";
+
+    /// <summary>
+    /// The Wallet service's <c>PlayerRegistered</c> queue. Must equal <c>PlayerRegisteredConsumerDefinition.QueueName</c>
+    /// in the Wallet service (the services do not share code).
+    /// </summary>
+    public const string WalletPlayerRegisteredQueue = "wallet-player-registered";
 
     /// <summary>Outbox and consumers; shared by the app and the tests' MassTransit test harness.</summary>
     /// <param name="outboxDelivery">
@@ -51,6 +108,26 @@ public static class UsersMessaging
     }
 
     /// <summary>
+    /// RabbitMQ host plus the publish topology this service relies on. RabbitMQ silently drops a message published to
+    /// an exchange with no bound queue (the outbox would then mark it delivered), so Users itself declares the durable
+    /// consumer queues for what it publishes and binds them to the message exchanges, at bus start. The queues are
+    /// therefore there whenever Users can publish, whatever the start order of the services or after a broker reset.
+    /// The declarations match what the consumers' receive endpoints declare (durable, not auto-delete, no arguments).
+    /// </summary>
+    public static void ConfigureRabbitMq(IRabbitMqBusFactoryConfigurator cfg, RabbitMqOptions rabbit)
+    {
+        cfg.Host(rabbit.Host, rabbit.Port, rabbit.VirtualHost, h =>
+        {
+            h.Username(rabbit.Username);
+            h.Password(rabbit.Password);
+        });
+        cfg.DeployPublishTopology = true;
+        cfg.Publish<PlayerRegistered>(p => p.BindQueue(p.Exchange.ExchangeName, WalletPlayerRegisteredQueue));
+        cfg.Publish<VerificationEmailRequested>(p =>
+            p.BindQueue(p.Exchange.ExchangeName, SendVerificationEmailConsumerDefinition.QueueName));
+    }
+
+    /// <summary>
     /// <c>Messaging:Transport</c> = <c>RabbitMq</c> (default) or <c>InMemory</c> (default in the <c>Testing</c>
     /// environment, so tests never need a broker). Queues are durable; several instances compete on the same queue.
     /// </summary>
@@ -59,6 +136,7 @@ public static class UsersMessaging
     {
         var transport = configuration[TransportKey] ?? (environment.IsEnvironment("Testing") ? "InMemory" : "RabbitMq");
         var rabbit = configuration.GetSection(RabbitMqOptions.Section).Get<RabbitMqOptions>() ?? new RabbitMqOptions();
+        services.Configure<MessagingOptions>(configuration.GetSection(MessagingOptions.Section));
 
         services.AddMassTransit(x =>
         {
@@ -71,11 +149,7 @@ public static class UsersMessaging
             {
                 x.UsingRabbitMq((ctx, cfg) =>
                 {
-                    cfg.Host(rabbit.Host, rabbit.Port, rabbit.VirtualHost, h =>
-                    {
-                        h.Username(rabbit.Username);
-                        h.Password(rabbit.Password);
-                    });
+                    ConfigureRabbitMq(cfg, rabbit);
                     cfg.ConfigureEndpoints(ctx);
                 });
             }

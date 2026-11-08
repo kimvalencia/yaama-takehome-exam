@@ -2,6 +2,7 @@ using Contracts;
 using MassTransit;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using WalletService.Data;
 using WalletService.Domain;
 
@@ -62,13 +63,22 @@ public sealed class PlayerRegisteredConsumerDefinition : ConsumerDefinition<Play
 {
     public const string QueueName = "wallet-player-registered";
 
-    public PlayerRegisteredConsumerDefinition() => EndpointName = QueueName;
+    private readonly MessagingOptions _options;
+
+    /// <remarks>The Users service declares this same queue (durable, no arguments) in its publish topology.</remarks>
+    public PlayerRegisteredConsumerDefinition(IOptions<MessagingOptions> options)
+    {
+        _options = options.Value;
+        EndpointName = QueueName;
+        ConcurrentMessageLimit = _options.ConcurrentMessageLimit;
+    }
 
     protected override void ConfigureConsumer(IReceiveEndpointConfigurator endpointConfigurator,
         IConsumerConfigurator<PlayerRegisteredConsumer> consumerConfigurator, IRegistrationContext context)
     {
-        // Retry outside the inbox/outbox so each attempt runs in a fresh DB transaction.
-        endpointConfigurator.UseMessageRetry(r => MessagingRetry.Configure(r));
+        // Kill switch + long retry outside the inbox/outbox, so each attempt runs in a fresh DB transaction and a
+        // database outage pauses the endpoint rather than draining messages into _error.
+        MessagingResilience.Apply(endpointConfigurator, _options);
         endpointConfigurator.UseEntityFrameworkOutbox<WalletDbContext>(context);
     }
 }

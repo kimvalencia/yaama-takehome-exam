@@ -1,5 +1,6 @@
 using Contracts;
 using MassTransit;
+using Microsoft.Extensions.Options;
 using UsersService.Data;
 using UsersService.Email;
 
@@ -7,7 +8,8 @@ namespace UsersService.Messaging;
 
 /// <summary>
 /// Sends the verification email. Runs from the outbox after the registration committed, so an SMTP outage only delays
-/// the email: the message is retried with backoff (and lands in the <c>_error</c> queue if every retry fails).
+/// the email: the message is retried with backoff for about 25 minutes, and the kill switch pauses the endpoint
+/// (messages stay queued) while sends keep failing.
 /// </summary>
 public sealed class SendVerificationEmailConsumer(IEmailSender email, ILogger<SendVerificationEmailConsumer> logger)
     : IConsumer<VerificationEmailRequested>
@@ -24,12 +26,20 @@ public sealed class SendVerificationEmailConsumerDefinition : ConsumerDefinition
 {
     public const string QueueName = "users-verification-email";
 
-    public SendVerificationEmailConsumerDefinition() => EndpointName = QueueName;
+    private readonly MessagingOptions _options;
+
+    public SendVerificationEmailConsumerDefinition(IOptions<MessagingOptions> options)
+    {
+        _options = options.Value;
+        EndpointName = QueueName;
+        ConcurrentMessageLimit = _options.ConcurrentMessageLimit;
+    }
 
     protected override void ConfigureConsumer(IReceiveEndpointConfigurator endpointConfigurator,
         IConsumerConfigurator<SendVerificationEmailConsumer> consumerConfigurator, IRegistrationContext context)
     {
-        endpointConfigurator.UseMessageRetry(r => MessagingRetry.Configure(r));
+        // An SMTP outage: long backoff per message, and the kill switch pauses the endpoint instead of faulting the rest.
+        MessagingResilience.Apply(endpointConfigurator, _options);
         // Inbox: a redelivered message (same MessageId) does not send a second email.
         endpointConfigurator.UseEntityFrameworkOutbox<UsersDbContext>(context);
     }

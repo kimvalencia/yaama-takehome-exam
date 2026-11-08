@@ -5,6 +5,7 @@ using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using UsersService.Data;
 using UsersService.Domain;
 using UsersService.Email;
@@ -142,6 +143,7 @@ public sealed class SendVerificationEmailConsumerTests(SqlServerFixture fx) : IA
             .AddLogging()
             .AddDbContext<UsersDbContext>(o => o.UseSqlServer(fx.NoDeliveryConnectionString))
             .AddSingleton<IEmailSender>(_email)
+            .Configure<MessagingOptions>(TestMessaging.FastRetry)
             .AddMassTransitTestHarness(x =>
             {
                 x.SetTestTimeouts(testTimeout: TimeSpan.FromSeconds(60));
@@ -183,7 +185,10 @@ public sealed class SendVerificationEmailConsumerTests(SqlServerFixture fx) : IA
     {
         var email = $"retry-{Guid.NewGuid():N}@example.com";
         const string url = "http://users.test/v1/users/verify?token=retry";
-        _email.FailNext(2); // SMTP down for the first two attempts
+        // SMTP down for 6 attempts: more than the old 5-retry policy survived, fewer than the 10 retries configured.
+        const int failures = 6;
+        Assert.True(failures < new MessagingOptions().Retry.Limit);
+        _email.FailNext(failures);
 
         var messageId = await PublishAsync(new VerificationEmailRequested(Guid.NewGuid(), email, url));
         var sent = await _email.WaitForAsync(email, TimeSpan.FromSeconds(30));
@@ -191,8 +196,23 @@ public sealed class SendVerificationEmailConsumerTests(SqlServerFixture fx) : IA
 
         Assert.Equal(url, sent.VerifyUrl);
         Assert.Single(_email.SentTo(email));
-        Assert.Equal(3, _email.Attempts);
+        Assert.Equal(failures + 1, _email.Attempts);
+        // Not faulted, so not moved to users-verification-email_error.
         Assert.False(_harness.Published.Select<Fault<VerificationEmailRequested>>().Any());
+    }
+
+    [Fact]
+    public void Email_endpoint_defaults_limit_concurrency_and_retry_for_long_outages()
+    {
+        var definition = new SendVerificationEmailConsumerDefinition(Options.Create(new MessagingOptions()));
+        var defaults = new MessagingOptions();
+
+        Assert.Equal(SendVerificationEmailConsumerDefinition.QueueName, ((IConsumerDefinition)definition).GetEndpointName(DefaultEndpointNameFormatter.Instance));
+        Assert.Equal(8, definition.ConcurrentMessageLimit);
+        Assert.Equal(10, defaults.Retry.Limit);
+        Assert.Equal(TimeSpan.FromMinutes(5), defaults.Retry.MaxInterval);
+        Assert.Equal(10, defaults.KillSwitch.ActivationThreshold);
+        Assert.Equal(0.15, defaults.KillSwitch.TripThreshold);
     }
 
     [Fact]
