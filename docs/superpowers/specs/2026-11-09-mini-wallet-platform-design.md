@@ -63,7 +63,7 @@ Stack: .NET 10 (the existing scaffolds target net10.0; the brief allows ".NET 8 
 
 ### Data
 - `Wallets(Id, PlayerId, Currency, Balance decimal(28,8), RowVersion)`: unique `(PlayerId, Currency)`.
-- `Transactions(Id, WalletId, ProviderId, Reference, Type, Amount, BalanceAfter, RelatedTransactionId?, CreatedAt)`: unique `(ProviderId, Reference)`. Top-ups use provider id `player-topup` and the client's idempotency key as the reference.
+- `Transactions(Id, WalletId, ProviderId, Reference, Type, Amount, BalanceAfter, RelatedTransactionId?, CreatedAt)`: unique `(ProviderId, Reference)`. Top-ups use provider id `topup:{playerId}` and the client's idempotency key as the reference.
 - Amounts are positive decimals; direction comes from the type. Currency precision is enforced (USD/EUR 2 decimals, BTC 8).
 
 ### Correct balance changes
